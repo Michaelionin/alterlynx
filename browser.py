@@ -13,6 +13,8 @@ import sys  # Для получения аргументов командной 
 class AlternetBrowser:
     # Константа для URL домашней страницы
     DEFAULT_HOME_URL = "http://ionics.neocities.org/alternet/list.md"
+    # Константа для URL списка сайтов
+    SITES_LIST_URL = "http://ionics.neocities.org/alternet/list.md"
 
     def __init__(self):
         # Initialize stdscr as None, it will be set by curses.wrapper
@@ -339,7 +341,7 @@ class AlternetBrowser:
 
         # Display status bar
         mode_text = "SIMPLE" if self.simple_mode else "NORMAL"
-        status_text = f"Mode: {mode_text} | Lines: {len(lines)} | Scroll: {scroll_pos + 1}/{len(lines)} | Links: {len(self.links)} Images: {len(self.images)} | Keys: j/k/pgup/pgdn - scroll, g/G - top/bottom, b - back, q - quit, l<n> - link, i<n> - image, m - toggle mode"
+        status_text = f"Mode: {mode_text} | Lines: {len(lines)} | Scroll: {scroll_pos + 1}/{len(lines)} | Links: {len(self.links)} Images: {len(self.images)} | Keys: j/k/pgup/pgdn - scroll, g/G - top/bottom, b - back, q - quit, l<n> - link, i<n> - image, m - toggle mode, s - search sites"
         # Truncate status text if necessary
         status_text = status_text[:max_x - 1]
         self.stdscr.addstr(max_y - status_bar_height, 0, status_text, self.color_status)
@@ -348,6 +350,166 @@ class AlternetBrowser:
         self.stdscr.clrtoeol()
 
         self.stdscr.refresh()
+
+    def search_sites(self):
+        """Displays a search interface for sites listed in SITES_LIST_URL."""
+        # Prompt for search query
+        self.stdscr.clear()
+        self.stdscr.addstr(0, 0, "Alternet Site Search", curses.A_REVERSE)
+        self.stdscr.clrtoeol()
+        self.stdscr.addstr(2, 0, "Enter search query: ", curses.A_BOLD)
+        self.stdscr.refresh()
+
+        # Get search query
+        search_query = ""
+        y, x = 2, 22
+        while True:
+            char = self.stdscr.getch()
+            if char == 10 or char == 13:  # Enter key
+                break
+            elif char == ord('q') or char == ord('Q'):  # Quit
+                return None
+            elif char == curses.KEY_BACKSPACE or char == 127 or char == 8:  # Backspace
+                if len(search_query) > 0:
+                    search_query = search_query[:-1]
+                    # Redraw line to remove character
+                    self.stdscr.move(y, x)
+                    self.stdscr.clrtoeol()
+                    self.stdscr.addstr(y, x, search_query)
+            elif 32 <= char <= 126:  # Printable characters
+                search_query += chr(char)
+                self.stdscr.addstr(y, x + len(search_query) - 1, chr(char))
+            self.stdscr.refresh()
+
+        if not search_query:
+            # If query is empty, perhaps show all or just return
+            msg = "Empty query. Press any key to return."
+            self.stdscr.addstr(4, 0, msg[:curses.COLS - 1], curses.color_pair(1) | curses.A_REVERSE)
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+            self.stdscr.getch()  # Wait for keypress
+            return None
+
+        # Fetch the list of sites
+        markdown_content = self.fetch_markdown(self.SITES_LIST_URL)
+        if not markdown_content or markdown_content.startswith("[ERROR]"):
+            error_msg = f"Failed to load site list: {markdown_content if markdown_content else 'No content'}"
+            self.stdscr.addstr(4, 0, error_msg[:curses.COLS - 1], curses.color_pair(1) | curses.A_REVERSE)
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+            self.stdscr.getch()  # Wait for keypress to acknowledge
+            return None
+
+        # Parse markdown to extract links and their text content
+        ast = commonmark.Parser().parse(markdown_content)
+        walker = ast.walker()
+
+        sites = []  # List of (link_text, destination_url)
+        current_link_text = ""  # To accumulate text *inside* the link
+
+        for current, entering in walker:
+            node_type = current.t
+            literal = current.literal
+
+            if node_type == 'link':
+                if entering:
+                    # Start collecting text for this link
+                    current_link_text = ""
+                else:  # exiting the link node
+                    # The destination URL is current.destination
+                    dest_url = urljoin(self.SITES_LIST_URL, current.destination)
+                    # Use the accumulated text inside the link as the link text
+                    link_text = current_link_text.strip()
+                    if link_text and dest_url:  # Only add if both exist
+                        sites.append((link_text, dest_url))
+                    # Reset for the next link
+                    current_link_text = ""
+            elif node_type == 'text' and current_link_text is not None:
+                # If we are inside a link (current_link_text is not None),
+                # add the text literal to the current link's text
+                current_link_text += literal
+
+        # Filter sites based on search query (case-insensitive)
+        search_lower = search_query.lower()
+        filtered_sites = [(name, url) for name, url in sites if search_lower in name.lower()]
+
+        # Display search results
+        self.stdscr.clear()
+        self.stdscr.addstr(0, 0, f"Alternet Search: '{search_query}'", curses.A_REVERSE)
+        self.stdscr.clrtoeol()
+
+        if not filtered_sites:
+            self.stdscr.addstr(2, 0, f"No sites found matching '{search_query}'. Press any key to return.",
+                               curses.A_NORMAL)
+        else:
+            self.stdscr.addstr(2, 0,
+                               f"Found {len(filtered_sites)} site(s) matching '{search_query}'. Select one (or 'q' to cancel):",
+                               curses.A_NORMAL)
+            max_y, max_x = self.stdscr.getmaxyx()
+            start_display_y = 4
+            for i, (name, url) in enumerate(filtered_sites):
+                display_num = i + 1
+                display_text = f"{display_num}. {name[:max_x - 5]} -> {url[:max_x - 5 - len(name) - 6]}"
+                if len(display_text) > max_x - 1:
+                    display_text = display_text[:max_x - 4] + "..."
+                self.stdscr.addstr(start_display_y + i, 0, display_text, curses.A_NORMAL)
+                if start_display_y + i >= max_y - 3:  # Leave space for prompt and error
+                    break
+
+        # Prompt for selection if there are results
+        if filtered_sites:
+            prompt_y = max(5, start_display_y + len(filtered_sites))
+            self.stdscr.addstr(prompt_y, 0, "Enter number: ", curses.A_BOLD)
+            self.stdscr.refresh()
+
+            # Get user input for selection
+            input_str = ""
+            y, x = prompt_y, 14
+            while True:
+                char = self.stdscr.getch()
+                if char == 10 or char == 13:  # Enter key
+                    break
+                elif char == ord('q') or char == ord('Q'):  # Quit
+                    return None
+                elif char == curses.KEY_BACKSPACE or char == 127 or char == 8:  # Backspace
+                    if len(input_str) > 0:
+                        input_str = input_str[:-1]
+                        # Redraw line to remove character
+                        self.stdscr.move(y, x)
+                        self.stdscr.clrtoeol()
+                        self.stdscr.addstr(y, x, input_str)
+                elif 48 <= char <= 57:  # Digits 0-9
+                    input_str += chr(char)
+                    self.stdscr.addstr(y, x + len(input_str) - 1, chr(char))
+                self.stdscr.refresh()
+
+            # Process the input
+            try:
+                selection_num = int(input_str)
+                if 1 <= selection_num <= len(filtered_sites):
+                    selected_url = filtered_sites[selection_num - 1][1]
+                    return selected_url
+                else:
+                    error_msg = f"Invalid selection: {selection_num}. Must be between 1 and {len(filtered_sites)}."
+                    self.stdscr.addstr(prompt_y + 2, 0, error_msg[:curses.COLS - 1],
+                                       curses.color_pair(1) | curses.A_REVERSE)
+                    self.stdscr.clrtoeol()
+                    self.stdscr.refresh()
+                    self.stdscr.getch()  # Wait for keypress
+                    return self.search_sites()  # Recursive call to try again
+            except ValueError:
+                error_msg = f"Invalid input: '{input_str}'. Please enter a number."
+                self.stdscr.addstr(prompt_y + 2, 0, error_msg[:curses.COLS - 1],
+                                   curses.color_pair(1) | curses.A_REVERSE)
+                self.stdscr.clrtoeol()
+                self.stdscr.refresh()
+                self.stdscr.getch()  # Wait for keypress
+                return self.search_sites()  # Recursive call to try again
+        else:
+            # No results, just wait for a key press to return
+            self.stdscr.refresh()
+            self.stdscr.getch()
+            return None
 
     def open_image(self, image_url):
         """Downloads and opens an image using PIL/Pillow."""
@@ -468,6 +630,16 @@ class AlternetBrowser:
             elif key == ord('m'):  # Toggle mode
                 self.simple_mode = not self.simple_mode
                 # Redraw after toggling mode
+                continue  # Skip the rest of the loop iteration to redraw immediately
+            elif key == ord('s'):  # Search sites
+                selected_url = self.search_sites()
+                if selected_url:
+                    # Add current URL to history before navigating to search result
+                    if self.current_url != self.history[-1]:
+                        self.history.append(self.current_url)
+                    url = self.normalize_url(selected_url)
+                    scroll_pos = 0  # Reset scroll on search result click
+                # Redraw after search (whether a site was selected or not)
                 continue  # Skip the rest of the loop iteration to redraw immediately
             elif key in (ord('l'), ord('i')):  # Handle link/image selection
                 # Temporarily switch to non-blocking mode to get the number
